@@ -20,6 +20,8 @@ import (
 	"unicode"
 )
 
+const version = "v0.1.0-rev1"
+
 /* ---------------- folder scanning ---------------- */
 
 var ignoredNames = map[string]bool{"thumbs.db": true, "desktop.ini": true, ".ds_store": true, ".git": true, "$recycle.bin": true}
@@ -255,7 +257,7 @@ func gitNameLess(a, b entry) bool {
 }
 
 // writeTree stores a folder as a git tree; returns ok=false for folders with no files.
-func (w *packWriter) writeTree(dir string, stats *stats) ([20]byte, bool, error) {
+func (w *packWriter) writeTree(dir, rel string, stats *stats) ([20]byte, bool, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return [20]byte{}, false, err
@@ -267,7 +269,7 @@ func (w *packWriter) writeTree(dir string, stats *stats) ([20]byte, bool, error)
 		}
 		p := filepath.Join(dir, e.Name())
 		if e.IsDir() {
-			id, ok, err := w.writeTree(p, stats)
+			id, ok, err := w.writeTree(p, rel+e.Name()+"/", stats)
 			if err != nil {
 				return id, false, err
 			}
@@ -283,8 +285,8 @@ func (w *packWriter) writeTree(dir string, stats *stats) ([20]byte, bool, error)
 			id := w.put("blob", 3, data)
 			if w.count > before {
 				stats.newBytes += int64(len(data))
-				stats.newFiles++
 			}
+			stats.files[rel+e.Name()] = id
 			list = append(list, entry{e.Name(), false, id})
 		}
 	}
@@ -307,8 +309,42 @@ func (w *packWriter) writeTree(dir string, stats *stats) ([20]byte, bool, error)
 }
 
 type stats struct {
-	newFiles int
-	newBytes int64
+	files    map[string][20]byte // path -> blob id in this version
+	newBytes int64               // bytes of content not seen in any earlier version
+}
+
+// describe compares this version's files with the previous version of the same 稿.
+func describe(prev, cur map[string][20]byte, newBytes int64) string {
+	var add, mod, del int
+	for p, id := range cur {
+		if old, ok := prev[p]; !ok {
+			add++
+		} else if old != id {
+			mod++
+		}
+	}
+	for p := range prev {
+		if _, ok := cur[p]; !ok {
+			del++
+		}
+	}
+	var parts []string
+	if add > 0 {
+		parts = append(parts, fmt.Sprintf("新增 %d", add))
+	}
+	if mod > 0 {
+		parts = append(parts, fmt.Sprintf("修改 %d", mod))
+	}
+	if del > 0 {
+		parts = append(parts, fmt.Sprintf("删除 %d", del))
+	}
+	if len(parts) == 0 {
+		return "与上一版相同"
+	}
+	if newBytes == 0 {
+		return strings.Join(parts, " · ")
+	}
+	return strings.Join(parts, " · ") + "，" + human(newBytes)
 }
 
 func sigTime(t time.Time) string {
@@ -373,9 +409,10 @@ func build(p *plan, author string, out string, progress func(string)) (*result, 
 	for _, b := range p.branches {
 		var parent *[20]byte
 		var last time.Time
+		prevFiles := map[string][20]byte{}
 		for i, s := range b.snaps {
-			st := &stats{}
-			tree, ok, err := w.writeTree(s.dir, st)
+			st := &stats{files: map[string][20]byte{}}
+			tree, ok, err := w.writeTree(s.dir, "", st)
 			if err != nil {
 				return nil, err
 			}
@@ -398,7 +435,8 @@ func build(p *plan, author string, out string, progress func(string)) (*result, 
 			id := w.put("commit", 1, c.Bytes())
 			parent = &id
 			commits++
-			progress(fmt.Sprintf("  %s / %d. %s  （新增 %d 个文件，%s）", b.name, i+1, s.name, st.newFiles, human(st.newBytes)))
+			progress(fmt.Sprintf("  %s / %d. %s  （%s）", b.name, i+1, s.name, describe(prevFiles, st.files, st.newBytes)))
+			prevFiles = st.files
 		}
 		if parent != nil {
 			n := refName(b.name)
@@ -480,7 +518,7 @@ func human(n int64) string {
 /* ---------------- console UI ---------------- */
 
 func printPlan(p *plan) {
-	fmt.Printf("\n仓库：%s\n", p.name)
+	fmt.Printf("\n稿本打包 %s\n仓库：%s\n", version, p.name)
 	order := "按最后修改时间，从早到晚"
 	if p.byName {
 		order = "按文件夹名称"
@@ -513,7 +551,12 @@ func main() {
 	flat := flag.Bool("flat", false, "所有子文件夹都当作同一稿的各版")
 	outDir := flag.String("o", "", "bundle 输出目录（默认放在拖入文件夹的旁边）")
 	author := flag.String("author", defaultAuthor(), "提交作者名")
+	showVersion := flag.Bool("version", false, "显示版本号")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("稿本打包 " + version)
+		return
+	}
 	setupConsole()
 	interactive := !*yes
 
@@ -521,8 +564,8 @@ func main() {
 	if flag.NArg() > 0 {
 		root = flag.Arg(0)
 	} else {
-		fmt.Println("稿本打包")
-		fmt.Println("把要打包的文件夹拖到这个窗口里，然后按回车：")
+		fmt.Println("稿本打包 " + version)
+		fmt.Println("输入（或粘贴、拖入）要打包的文件夹路径，然后按回车：")
 		root = readLine()
 	}
 	root = strings.Trim(strings.TrimSpace(root), "\"'")

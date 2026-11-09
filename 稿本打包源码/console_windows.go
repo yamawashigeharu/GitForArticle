@@ -23,7 +23,7 @@ var (
 func setupConsole() {
 	procSetOutputCP.Call(65001)
 	procSetCP.Call(65001)
-	if t, err := syscall.UTF16PtrFromString("稿本打包"); err == nil {
+	if t, err := syscall.UTF16PtrFromString("稿本打包 " + version); err == nil {
 		procSetTitle.Call(uintptr(unsafe.Pointer(t)))
 	}
 }
